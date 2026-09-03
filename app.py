@@ -855,5 +855,176 @@ def main():
         sys.exit(1)
 
 
-if __name__ == "__main__":
+def _running_in_streamlit() -> bool:
+    """Detecta se o arquivo está sendo executado via `streamlit run`."""
+    import os
+    # Variáveis que o Streamlit define no processo
+    if os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("STREAMLIT_RUNTIME_ENV"):
+        return True
+    if any("streamlit" in str(arg).lower() for arg in sys.argv):
+        return True
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
+def run_streamlit_app() -> None:
+    """Interface web — não altera a lógica de processamento."""
+    import streamlit as st
+
+    st.set_page_config(
+        page_title="FM26 Moneyball",
+        page_icon="⚽",
+        layout="centered",
+        initial_sidebar_state="expanded",
+    )
+
+    st.title("⚽ FM26 Moneyball")
+    st.caption("Envie um save Footlord / FM26 (.fl ou .db) e baixe a planilha Moneyball.")
+
+    with st.sidebar:
+        st.header("Opções")
+        language = st.radio(
+            "Idioma da planilha",
+            options=("pt", "en"),
+            format_func=lambda x: "Português" if x == "pt" else "English",
+            index=0,
+        )
+        st.markdown("---")
+        st.markdown(
+            "Abas geradas:\n"
+            "- **Players 2**\n"
+            "- **Goleiros xG**\n"
+            "- **Times**\n"
+            "- **Resumo**\n"
+            "- **Dicionário**"
+        )
+        st.markdown("---")
+        st.caption("CLI: `python app.py --save arquivo.fl --output saida.xlsx`")
+        if st.button("Limpar resultado em memória"):
+            for key in ("xlsx_bytes", "xlsx_name", "xlsx_info", "template_bytes"):
+                st.session_state.pop(key, None)
+            st.rerun()
+
+    uploaded = st.file_uploader(
+        "Save FM26 / Footlord",
+        type=["fl", "db"],
+        help="Arquivo .fl (ZIP do save) ou .db extraído",
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        generate = st.button(
+            "Gerar planilha",
+            type="primary",
+            use_container_width=True,
+            disabled=uploaded is None,
+        )
+    with col2:
+        template_only = st.button("Só modelo vazio", use_container_width=True)
+
+    if template_only:
+        with tempfile.TemporaryDirectory(prefix="fm26-st-") as temporary_dir:
+            out = Path(temporary_dir) / "Moneyball_modelo_limpo.xlsx"
+            try:
+                with st.spinner("Criando modelo limpo..."):
+                    data = {
+                        "current_day": 0,
+                        "club": "Modelo",
+                        "players": [],
+                        "gks": [],
+                        "teams": [],
+                        "club_summary": {"matches": 0, "shots": 0, "goals": 0, "xga": 0.0, "ga": 0},
+                        "played_matches": 0,
+                    }
+                    create_workbook(data, out, language)
+                st.session_state["template_bytes"] = out.read_bytes()
+                st.session_state["xlsx_bytes"] = None
+                st.session_state["xlsx_name"] = None
+                st.session_state["xlsx_info"] = None
+            except Exception as error:
+                st.error(f"Erro: {error}")
+
+    if generate and uploaded is not None:
+        progress = st.progress(0, text="Iniciando...")
+        status = st.empty()
+
+        def ui_emit(percent: int, message: str) -> None:
+            progress.progress(min(100, max(0, int(percent))) / 100.0, text=message)
+            status.info(message)
+
+        global emit
+        original_emit = emit
+        emit = ui_emit  # type: ignore[assignment]
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="fm26-st-") as temporary_dir:
+                safe_name = Path(uploaded.name).name.replace(" ", "_")
+                save_path = Path(temporary_dir) / safe_name
+                save_path.write_bytes(uploaded.getvalue())
+                out_name = f"Moneyball_{Path(safe_name).stem}.xlsx"
+                output_path = Path(temporary_dir) / out_name
+
+                ui_emit(5, "Lendo o save...")
+                data = extract_data(save_path)
+                ui_emit(80, "Montando a planilha...")
+                create_workbook(data, output_path, language)
+                ui_emit(100, "Concluído")
+
+                xlsx_bytes = output_path.read_bytes()
+                st.session_state["xlsx_bytes"] = xlsx_bytes
+                st.session_state["xlsx_name"] = out_name
+                st.session_state["xlsx_info"] = {
+                    "club": data.get("club", "Save"),
+                    "day": data.get("current_day", "?"),
+                    "players": len(data.get("players", [])),
+                    "gks": len(data.get("gks", [])),
+                    "teams": len(data.get("teams", [])),
+                    "size_mb": round(len(xlsx_bytes) / (1024 * 1024), 2),
+                }
+                st.session_state.pop("template_bytes", None)
+                status.empty()
+                progress.empty()
+        except Exception as error:
+            st.error(f"Erro ao processar o save: {error}")
+            st.session_state.pop("xlsx_bytes", None)
+            st.session_state.pop("xlsx_name", None)
+            st.session_state.pop("xlsx_info", None)
+        finally:
+            emit = original_emit  # type: ignore[assignment]
+
+    # Download fora do if generate → sobrevive ao clique (session_state)
+    if st.session_state.get("xlsx_bytes"):
+        info = st.session_state.get("xlsx_info") or {}
+        st.success(
+            f"**{info.get('club', 'Save')}** — data interna **{info.get('day', '?')}** · "
+            f"{info.get('players', '?')} jogadores · {info.get('gks', '?')} goleiros · "
+            f"{info.get('teams', '?')} times · ~{info.get('size_mb', '?')} MB"
+        )
+        st.download_button(
+            label="⬇️ Baixar planilha Moneyball (.xlsx)",
+            data=st.session_state["xlsx_bytes"],
+            file_name=st.session_state.get("xlsx_name") or "Moneyball.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_moneyball",
+        )
+
+    if st.session_state.get("template_bytes"):
+        st.success("Modelo limpo criado.")
+        st.download_button(
+            label="⬇️ Baixar modelo XLSX",
+            data=st.session_state["template_bytes"],
+            file_name="Moneyball_modelo_limpo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_template",
+        )
+
+
+if _running_in_streamlit():
+    run_streamlit_app()
+elif __name__ == "__main__":
     main()
