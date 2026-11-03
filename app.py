@@ -38,6 +38,46 @@ COLORS = {
 # Papéis de linha (sem GK) — cada um vira coluna própria
 OUTFIELD_ROLES = ["CD", "LB", "RB", "CDM", "CM", "CAM", "LM", "RM", "LW", "RW", "ST"]
 
+
+# --- Novas mecânicas Footlord (Moral / Forma / Plantel / Prêmios semanais) ---
+SQUAD_ROLE_LABELS = {
+    1: "Titular absoluto",
+    2: "Titular",
+    3: "Rotação",
+    4: "Reserva",
+    5: "Promessa",
+}
+SQUAD_ROLE_EXPECTED_PCT = {
+    1: 0.85,
+    2: 0.65,
+    3: 0.40,
+    4: 0.20,
+    5: 0.05,
+}
+
+def morale_label(value):
+    if value is None:
+        return ""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if v >= 65:
+        return "Muito boa"
+    if v >= 55:
+        return "Boa"
+    if v >= 45:
+        return "Neutra"
+    if v >= 35:
+        return "Ruim"
+    return "Muito ruim"
+
+def squad_role_label(value):
+    try:
+        return SQUAD_ROLE_LABELS.get(int(value), "")
+    except (TypeError, ValueError):
+        return ""
+
 PLAYERS_HEADERS = [
     "Rank", "Jogador", "Posição",
     "Role CD", "Role LB", "Role RB", "Role CDM", "Role CM", "Role CAM", "Role LM", "Role RM", "Role LW", "Role RW", "Role ST",
@@ -53,6 +93,10 @@ PLAYERS_HEADERS = [
     "Média de avaliação", "Minutos estimados", "Minutos/partida", "Minutos/gol", "Minutos/assistência",
     "MVP do time", "Pior nota do time", "MVP %", "Pior nota %", "Clean sheets",
     "Valor de mercado em €", "Salário em €", "Contrato (anos)", "Status", "Empréstimo", "Lista de transferências",
+    "Moral", "Nível de moral", "Forma", "Forma recente", "Momento da forma",
+    "Papel no plantel", "Papel no plantel (cód.)", "Tempo de jogo esperado %",
+    "Tempo de jogo na temporada %", "Diff tempo de jogo (real − esperado)",
+    "Time da semana", "Time do mês", "Jogador da semana",
     "PAC", "SHO", "PAS", "DEF", "PHY", "MEN", "GKP", "ID interno",
 ]
 
@@ -114,6 +158,20 @@ TIMES_HEADERS = [
 ]
 
 HEADER_TRANSLATIONS_EN = {
+    "Moral": "Morale",
+    "Nível de moral": "Morale level",
+    "Forma": "Form",
+    "Forma recente": "Recent form",
+    "Momento da forma": "Form momentum",
+    "Papel no plantel": "Squad role",
+    "Papel no plantel (cód.)": "Squad role (code)",
+    "Tempo de jogo esperado %": "Expected playing time %",
+    "Tempo de jogo na temporada %": "Season playing time %",
+    "Diff tempo de jogo (real − esperado)": "Playing time diff (actual − expected)",
+    "Time da semana": "Team of the week",
+    "Time do mês": "Team of the month",
+    "Jogador da semana": "Player of the week",
+
     "Maior sequência invencibilidade da temporada": "Longest unbeaten streak (season)",
     "Maior sequência sem vencer da temporada": "Longest winless streak (season)",
     "xG criado na temporada": "xG created (season)",
@@ -1265,6 +1323,24 @@ def extract_data(save_path: Path):
             player["red_cards"] = parse_count_blocks(player.get("s_r_cards"))
             player["market_value"] = si(player.get("temp_mk_value_modded")) or si(player.get("temp_mk_value"))
             player["salary"] = si(player.get("salary"))
+            # Novas mecânicas (saves novos; ausentes = None)
+            player["morale"] = sf(player.get("morale")) if player.get("morale") is not None else None
+            player["morale_level"] = morale_label(player["morale"])
+            player["form"] = sf(player.get("form")) if player.get("form") is not None else None
+            fr = player.get("form_recent")
+            player["form_recent"] = str(fr).replace("|", " ") if fr not in (None, "") else ""
+            player["form_momentum"] = sf(player.get("form_momentum")) if player.get("form_momentum") is not None else None
+            sr = player.get("squad_role")
+            try:
+                player["squad_role"] = int(sr) if sr is not None and str(sr).strip() != "" else None
+            except (TypeError, ValueError):
+                player["squad_role"] = None
+            player["squad_role_label"] = squad_role_label(player["squad_role"])
+            player["expected_play_pct"] = SQUAD_ROLE_EXPECTED_PCT.get(player["squad_role"]) if player["squad_role"] else None
+            # Prêmios semanais/mensais via h_rewards (tipos novos 7/9/10)
+            player["totw"] = 0  # time da semana (tipo 10)
+            player["totm"] = 0  # time do mês (tipo 9 — melhor hipótese)
+            player["potw"] = 0  # jogador da semana (tipo 7)
             
             # Correção de Idade: birth_date é dias desde o início? Não, costuma ser dias relativos.
             # No save auditado: birth_date ~ -8707. 8707 / 365.25 = 23.8 anos.
@@ -1284,6 +1360,34 @@ def extract_data(save_path: Path):
                 "sub_ast": 0, "sub_dec_ast": 0, "sub_sav_ast": 0, "sub_mvp": 0,
             })
             players[si(player["id"])] = player
+        
+        # Contagem prêmios semanais/mensais (h_rewards tipos 7/9/10) — saves novos
+        for player in players.values():
+            for typ, comp, cnt in parse_reward_items(player.get("h_rewards")):
+                if typ == 10:
+                    player["totw"] += cnt
+                elif typ == 9:
+                    player["totm"] += cnt
+                elif typ == 7:
+                    player["potw"] += cnt
+        # Reforço via historic_awards2 se existir (tipo 10=TOTW, 7=POTW)
+        try:
+            for row in cur.execute(
+                "SELECT player_id, award_type, COUNT(*) AS n FROM historic_awards2 "
+                "WHERE award_type IN (7, 10) GROUP BY player_id, award_type"
+            ):
+                pid = si(row["player_id"])
+                if pid not in players:
+                    continue
+                at = si(row["award_type"])
+                n = si(row["n"])
+                if at == 10:
+                    players[pid]["totw"] = max(players[pid].get("totw", 0), n)
+                elif at == 7:
+                    players[pid]["potw"] = max(players[pid].get("potw", 0), n)
+        except Exception:
+            pass
+
         emit(38, "Calculando minutos, ratings e xG (temporada atual)")
         season_start = date_info.get("season_start_day", 0)
         all_matches = cur.execute(
@@ -1525,6 +1629,13 @@ def extract_data(save_path: Path):
 
 def player_values(players):
     rows = []
+    # Máximo de jogos por time (para % de tempo de jogo na temporada)
+    team_max_apps = {}
+    for p in players:
+        tid = si(p.get("team_id"), -1)
+        apps = p.get("apps") or p.get("games") or 0
+        if tid > 0:
+            team_max_apps[tid] = max(team_max_apps.get(tid, 0), apps)
     for rank, player in enumerate(players, 1):
         name = " ".join(part for part in (str(player.get("name") or "").strip(), str(player.get("surname") or "").strip()) if part) or f"ID {player['id']}"
         current = round(player["overall"], 1)
@@ -1533,6 +1644,10 @@ def player_values(players):
         # Usar apps (reconstruído das partidas) se games (bruto do save) estiver zerado
         games_val = player["apps"] if player["apps"] > 0 else player["games"]
         games, yellow, red = int(round(games_val)), int(round(player["yellow_cards"])), int(round(player["red_cards"]))
+        tid = si(player.get("team_id"), -1)
+        tmax = team_max_apps.get(tid, 0) if tid > 0 else 0
+        # % de participação na temporada (jogos do jogador / mais usado do elenco)
+        player["_play_pct"] = round(games / tmax, 3) if tmax > 0 else None
         
         pen_taken = player["pen_taken"]
         pen_scored = player["pen_scored"]
@@ -1577,6 +1692,20 @@ def player_values(players):
             "Sem clube" if si(player.get("team_id"), -1) <= 0 else ("Em empréstimo" if si(player.get("loan_status")) else "Contrato"),
             "Sim" if si(player.get("loan_status")) else "Não",
             "Sim" if si(player.get("transfer_status")) == 1 else "Não",
+            r1(player["morale"]) if player.get("morale") is not None else None,
+            player.get("morale_level") or "",
+            r1(player["form"]) if player.get("form") is not None else None,
+            player.get("form_recent") or "",
+            round(sf(player.get("form_momentum")), 3) if player.get("form_momentum") is not None else None,
+            player.get("squad_role_label") or "",
+            player.get("squad_role"),
+            round(player["expected_play_pct"], 3) if player.get("expected_play_pct") is not None else None,
+            player.get("_play_pct"),
+            (round(player["_play_pct"] - player["expected_play_pct"], 3)
+             if player.get("_play_pct") is not None and player.get("expected_play_pct") is not None else None),
+            int(player.get("totw") or 0),
+            int(player.get("totm") or 0),
+            int(player.get("potw") or 0),
             r1(sf(player.get("PAC"))), r1(sf(player.get("SHO"))), r1(sf(player.get("PAS"))),
             r1(sf(player.get("DEF"))), r1(sf(player.get("PHY"))), r1(sf(player.get("MEN"))),
             r1(sf(player.get("GKP"))), player["id"],
@@ -1727,8 +1856,14 @@ def create_workbook(data, output_path, language="pt"):
         66: "0",  # clean sheets
         67: NUM_FORMAT_INT, 68: NUM_FORMAT_INT,  # €
         69: NUM_FORMAT_DEC1,  # contrato anos
-        **{i: NUM_FORMAT_DEC1 for i in range(73, 80)},  # PAC..GKP
-        80: "0",  # id
+        73: NUM_FORMAT_DEC1,  # moral
+        75: NUM_FORMAT_DEC1,  # forma
+        77: NUM_FORMAT_DEC3,  # momento forma
+        79: "0",  # papel cód
+        80: NUM_FORMAT_PCT, 81: NUM_FORMAT_PCT, 82: NUM_FORMAT_PCT,  # tempo jogo %
+        83: "0", 84: "0", 85: "0",  # prêmios
+        **{i: NUM_FORMAT_DEC1 for i in range(86, 93)},  # PAC..GKP
+        93: "0",  # id
     }
     # Colorir só o que compara desempenho (não nomes/IDs/status)
     p_colors = (
@@ -1740,7 +1875,8 @@ def create_workbook(data, output_path, language="pt"):
         + list(range(44, 57))  # impacto + reserva
         + [57, 58, 59, 60, 61, 62, 63, 64, 65, 66]  # rating/min/mvp/clean
         + [67, 68]  # valor/salário
-        + list(range(73, 80))  # atributos
+        + [73, 75, 77, 80, 81, 82, 83, 84, 85]  # moral/forma/tempo/prêmios
+        + list(range(86, 93))  # atributos
     )
     # Invertido: menor é melhor
     p_inv = [
