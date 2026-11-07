@@ -93,11 +93,8 @@ PLAYERS_HEADERS = [
     "Média de avaliação", "Minutos estimados", "Minutos/partida", "Minutos/gol", "Minutos/assistência",
     "MVP do time", "Pior nota do time", "MVP %", "Pior nota %", "Clean sheets",
     "Valor de mercado em €", "Salário em €", "Contrato (anos)", "Status", "Empréstimo", "Lista de transferências",
-    "Moral", "Nível de moral", "Forma", "Forma recente", "Momento da forma",
-    "Papel no plantel", "Papel no plantel (cód.)", "Tempo de jogo esperado %",
-    "Tempo de jogo na temporada %", "Diff tempo de jogo (real − esperado)",
-    "Time da semana", "Time do mês", "Jogador da semana",
-    "PAC", "SHO", "PAS", "DEF", "PHY", "MEN", "GKP", "ID interno",
+    "Moral", "Forma", "Forma recente 1", "Forma recente 2", "Forma recente 3", "Forma recente 4", "Forma recente 5", "Momento da forma",
+    "PAC", "SHO", "PAS", "DEF", "PHY", "MEN", "REG", "GKP", "ID interno",
 ]
 
 
@@ -159,18 +156,19 @@ TIMES_HEADERS = [
 
 HEADER_TRANSLATIONS_EN = {
     "Moral": "Morale",
-    "Nível de moral": "Morale level",
     "Forma": "Form",
-    "Forma recente": "Recent form",
+    "Forma recente 1": "Recent form 1",
+    "Forma recente 2": "Recent form 2",
+    "Forma recente 3": "Recent form 3",
+    "Forma recente 4": "Recent form 4",
+    "Forma recente 5": "Recent form 5",
     "Momento da forma": "Form momentum",
     "Papel no plantel": "Squad role",
     "Papel no plantel (cód.)": "Squad role (code)",
     "Tempo de jogo esperado %": "Expected playing time %",
     "Tempo de jogo na temporada %": "Season playing time %",
     "Diff tempo de jogo (real − esperado)": "Playing time diff (actual − expected)",
-    "Time da semana": "Team of the week",
-    "Time do mês": "Team of the month",
-    "Jogador da semana": "Player of the week",
+    "REG": "REG",
 
     "Maior sequência invencibilidade da temporada": "Longest unbeaten streak (season)",
     "Maior sequência sem vencer da temporada": "Longest winless streak (season)",
@@ -1325,11 +1323,37 @@ def extract_data(save_path: Path):
             player["salary"] = si(player.get("salary"))
             # Novas mecânicas (saves novos; ausentes = None)
             player["morale"] = sf(player.get("morale")) if player.get("morale") is not None else None
-            player["morale_level"] = morale_label(player["morale"])
             player["form"] = sf(player.get("form")) if player.get("form") is not None else None
-            fr = player.get("form_recent")
-            player["form_recent"] = str(fr).replace("|", " ") if fr not in (None, "") else ""
+            # Forma recente: até 5 notas separadas (mais recente primeiro no save)
+            fr_raw = player.get("form_recent")
+            fr_vals = []
+            if fr_raw not in (None, ""):
+                for part in str(fr_raw).split("|"):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    try:
+                        fr_vals.append(float(part))
+                    except (TypeError, ValueError):
+                        continue
+            player["form_recent_list"] = fr_vals[:5]
+            while len(player["form_recent_list"]) < 5:
+                player["form_recent_list"].append(None)
             player["form_momentum"] = sf(player.get("form_momentum")) if player.get("form_momentum") is not None else None
+            # REG (regularidade): 0–100 a partir da estabilidade das notas recentes
+            # alta média + baixa dispersão = REG alto; consistency do save costuma vir vazio
+            valid = [v for v in fr_vals if v is not None]
+            if len(valid) >= 2:
+                mean = sum(valid) / len(valid)
+                var = sum((v - mean) ** 2 for v in valid) / len(valid)
+                sd = var ** 0.5
+                # escala: média ~6–8, sd 0–2 → REG 0–100
+                reg = (mean / 10.0) * 100.0 * max(0.0, 1.0 - (sd / 2.5))
+                player["reg"] = round(max(0.0, min(100.0, reg)), 1)
+            elif len(valid) == 1:
+                player["reg"] = round(max(0.0, min(100.0, valid[0] * 10.0)), 1)
+            else:
+                player["reg"] = None
             sr = player.get("squad_role")
             try:
                 player["squad_role"] = int(sr) if sr is not None and str(sr).strip() != "" else None
@@ -1337,10 +1361,6 @@ def extract_data(save_path: Path):
                 player["squad_role"] = None
             player["squad_role_label"] = squad_role_label(player["squad_role"])
             player["expected_play_pct"] = SQUAD_ROLE_EXPECTED_PCT.get(player["squad_role"]) if player["squad_role"] else None
-            # Prêmios semanais/mensais via h_rewards (tipos novos 7/9/10)
-            player["totw"] = 0  # time da semana (tipo 10)
-            player["totm"] = 0  # time do mês (tipo 9 — melhor hipótese)
-            player["potw"] = 0  # jogador da semana (tipo 7)
             
             # Correção de Idade: birth_date é dias desde o início? Não, costuma ser dias relativos.
             # No save auditado: birth_date ~ -8707. 8707 / 365.25 = 23.8 anos.
@@ -1361,33 +1381,6 @@ def extract_data(save_path: Path):
             })
             players[si(player["id"])] = player
         
-        # Contagem prêmios semanais/mensais (h_rewards tipos 7/9/10) — saves novos
-        for player in players.values():
-            for typ, comp, cnt in parse_reward_items(player.get("h_rewards")):
-                if typ == 10:
-                    player["totw"] += cnt
-                elif typ == 9:
-                    player["totm"] += cnt
-                elif typ == 7:
-                    player["potw"] += cnt
-        # Reforço via historic_awards2 se existir (tipo 10=TOTW, 7=POTW)
-        try:
-            for row in cur.execute(
-                "SELECT player_id, award_type, COUNT(*) AS n FROM historic_awards2 "
-                "WHERE award_type IN (7, 10) GROUP BY player_id, award_type"
-            ):
-                pid = si(row["player_id"])
-                if pid not in players:
-                    continue
-                at = si(row["award_type"])
-                n = si(row["n"])
-                if at == 10:
-                    players[pid]["totw"] = max(players[pid].get("totw", 0), n)
-                elif at == 7:
-                    players[pid]["potw"] = max(players[pid].get("potw", 0), n)
-        except Exception:
-            pass
-
         emit(38, "Calculando minutos, ratings e xG (temporada atual)")
         season_start = date_info.get("season_start_day", 0)
         all_matches = cur.execute(
@@ -1693,21 +1686,12 @@ def player_values(players):
             "Sim" if si(player.get("loan_status")) else "Não",
             "Sim" if si(player.get("transfer_status")) == 1 else "Não",
             r1(player["morale"]) if player.get("morale") is not None else None,
-            player.get("morale_level") or "",
             r1(player["form"]) if player.get("form") is not None else None,
-            player.get("form_recent") or "",
+            *(player.get("form_recent_list") or [None] * 5),
             round(sf(player.get("form_momentum")), 3) if player.get("form_momentum") is not None else None,
-            player.get("squad_role_label") or "",
-            player.get("squad_role"),
-            round(player["expected_play_pct"], 3) if player.get("expected_play_pct") is not None else None,
-            player.get("_play_pct"),
-            (round(player["_play_pct"] - player["expected_play_pct"], 3)
-             if player.get("_play_pct") is not None and player.get("expected_play_pct") is not None else None),
-            int(player.get("totw") or 0),
-            int(player.get("totm") or 0),
-            int(player.get("potw") or 0),
             r1(sf(player.get("PAC"))), r1(sf(player.get("SHO"))), r1(sf(player.get("PAS"))),
             r1(sf(player.get("DEF"))), r1(sf(player.get("PHY"))), r1(sf(player.get("MEN"))),
+            r1(player["reg"]) if player.get("reg") is not None else None,
             r1(sf(player.get("GKP"))), player["id"],
         ])
     return rows
@@ -1857,13 +1841,11 @@ def create_workbook(data, output_path, language="pt"):
         67: NUM_FORMAT_INT, 68: NUM_FORMAT_INT,  # €
         69: NUM_FORMAT_DEC1,  # contrato anos
         73: NUM_FORMAT_DEC1,  # moral
-        75: NUM_FORMAT_DEC1,  # forma
-        77: NUM_FORMAT_DEC3,  # momento forma
-        79: "0",  # papel cód
-        80: NUM_FORMAT_PCT, 81: NUM_FORMAT_PCT, 82: NUM_FORMAT_PCT,  # tempo jogo %
-        83: "0", 84: "0", 85: "0",  # prêmios
-        **{i: NUM_FORMAT_DEC1 for i in range(86, 93)},  # PAC..GKP
-        93: "0",  # id
+        74: NUM_FORMAT_DEC1,  # forma
+        **{i: NUM_FORMAT_DEC1 for i in range(75, 80)},  # forma recente 1-5
+        80: NUM_FORMAT_DEC3,  # momento forma
+        **{i: NUM_FORMAT_DEC1 for i in range(81, 89)},  # PAC..REG..GKP
+        89: "0",  # id
     }
     # Colorir só o que compara desempenho (não nomes/IDs/status)
     p_colors = (
@@ -1875,8 +1857,8 @@ def create_workbook(data, output_path, language="pt"):
         + list(range(44, 57))  # impacto + reserva
         + [57, 58, 59, 60, 61, 62, 63, 64, 65, 66]  # rating/min/mvp/clean
         + [67, 68]  # valor/salário
-        + [73, 75, 77, 80, 81, 82, 83, 84, 85]  # moral/forma/tempo/prêmios
-        + list(range(86, 93))  # atributos
+        + [73, 74, 75, 76, 77, 78, 79, 80]  # moral/forma
+        + list(range(81, 89))  # atributos + REG
     )
     # Invertido: menor é melhor
     p_inv = [
