@@ -94,7 +94,7 @@ PLAYERS_HEADERS = [
     "MVP do time", "Pior nota do time", "MVP %", "Pior nota %", "Clean sheets",
     "Valor de mercado em €", "Salário em €", "Contrato (anos)", "Status", "Empréstimo", "Lista de transferências",
     "Moral", "Forma", "Forma recente 1", "Forma recente 2", "Forma recente 3", "Forma recente 4", "Forma recente 5", "Momento da forma",
-    "PAC", "SHO", "PAS", "DEF", "PHY", "MEN", "REG", "GKP", "ID interno",
+    "PAC", "SHO", "PAS", "DEF", "PHY", "MEN", "GKP", "ID interno",
 ]
 
 
@@ -168,7 +168,6 @@ HEADER_TRANSLATIONS_EN = {
     "Tempo de jogo esperado %": "Expected playing time %",
     "Tempo de jogo na temporada %": "Season playing time %",
     "Diff tempo de jogo (real − esperado)": "Playing time diff (actual − expected)",
-    "REG": "REG",
 
     "Maior sequência invencibilidade da temporada": "Longest unbeaten streak (season)",
     "Maior sequência sem vencer da temporada": "Longest winless streak (season)",
@@ -1340,31 +1339,6 @@ def extract_data(save_path: Path):
             while len(player["form_recent_list"]) < 5:
                 player["form_recent_list"].append(None)
             player["form_momentum"] = sf(player.get("form_momentum")) if player.get("form_momentum") is not None else None
-            # REG (regularidade) 0–100
-            # 1) players2.consistency se o jogo gravar (hoje costuma vir NULL em todos)
-            # 2) senão: estabilidade das notas da TEMPORADA (s_ratings) — mais fiel que só 5 jogos
-            # 3) fallback: form_recent
-            cons = player.get("consistency")
-            if cons is not None and str(cons).strip() != "":
-                try:
-                    player["reg"] = round(max(0.0, min(100.0, float(cons))), 1)
-                except (TypeError, ValueError):
-                    player["reg"] = None
-            else:
-                valid = list(season_ratings) if season_ratings else [v for v in fr_vals if v is not None]
-                if len(valid) >= 2:
-                    mean = sum(valid) / len(valid)
-                    var = sum((v - mean) ** 2 for v in valid) / len(valid)
-                    sd = var ** 0.5
-                    # Atributo REGULARIDADE do jogo (como PAC/SHO). No .fl o campo
-                    # consistency ainda vem NULL; aproximamos pelas notas da temporada:
-                    # REG ≈ média×10 − desvio×30  (Kane no jogo=44 → fórmula=44.4)
-                    reg = mean * 10.0 - sd * 30.0
-                    player["reg"] = round(max(0.0, min(100.0, reg)), 1)
-                elif len(valid) == 1:
-                    player["reg"] = round(max(0.0, min(100.0, valid[0] * 10.0)), 1)
-                else:
-                    player["reg"] = None
             sr = player.get("squad_role")
             try:
                 player["squad_role"] = int(sr) if sr is not None and str(sr).strip() != "" else None
@@ -1702,7 +1676,6 @@ def player_values(players):
             round(sf(player.get("form_momentum")), 3) if player.get("form_momentum") is not None else None,
             r1(sf(player.get("PAC"))), r1(sf(player.get("SHO"))), r1(sf(player.get("PAS"))),
             r1(sf(player.get("DEF"))), r1(sf(player.get("PHY"))), r1(sf(player.get("MEN"))),
-            r1(player["reg"]) if player.get("reg") is not None else None,
             r1(sf(player.get("GKP"))), player["id"],
         ])
     return rows
@@ -1855,8 +1828,8 @@ def create_workbook(data, output_path, language="pt"):
         74: NUM_FORMAT_DEC1,  # forma
         **{i: NUM_FORMAT_DEC1 for i in range(75, 80)},  # forma recente 1-5
         80: NUM_FORMAT_DEC3,  # momento forma
-        **{i: NUM_FORMAT_DEC1 for i in range(81, 89)},  # PAC..REG..GKP
-        89: "0",  # id
+        **{i: NUM_FORMAT_DEC1 for i in range(81, 88)},  # PAC..GKP
+        88: "0",  # id
     }
     # Colorir só o que compara desempenho (não nomes/IDs/status)
     p_colors = (
@@ -1869,7 +1842,7 @@ def create_workbook(data, output_path, language="pt"):
         + [57, 58, 59, 60, 61, 62, 63, 64, 65, 66]  # rating/min/mvp/clean
         + [67, 68]  # valor/salário
         + [73, 74, 75, 76, 77, 78, 79, 80]  # moral/forma
-        + list(range(81, 89))  # atributos + REG
+        + list(range(81, 88))  # atributos
     )
     # Invertido: menor é melhor
     p_inv = [
