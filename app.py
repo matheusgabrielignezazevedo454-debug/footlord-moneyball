@@ -1340,20 +1340,31 @@ def extract_data(save_path: Path):
             while len(player["form_recent_list"]) < 5:
                 player["form_recent_list"].append(None)
             player["form_momentum"] = sf(player.get("form_momentum")) if player.get("form_momentum") is not None else None
-            # REG (regularidade): 0–100 a partir da estabilidade das notas recentes
-            # alta média + baixa dispersão = REG alto; consistency do save costuma vir vazio
-            valid = [v for v in fr_vals if v is not None]
-            if len(valid) >= 2:
-                mean = sum(valid) / len(valid)
-                var = sum((v - mean) ** 2 for v in valid) / len(valid)
-                sd = var ** 0.5
-                # escala: média ~6–8, sd 0–2 → REG 0–100
-                reg = (mean / 10.0) * 100.0 * max(0.0, 1.0 - (sd / 2.5))
-                player["reg"] = round(max(0.0, min(100.0, reg)), 1)
-            elif len(valid) == 1:
-                player["reg"] = round(max(0.0, min(100.0, valid[0] * 10.0)), 1)
+            # REG (regularidade) 0–100
+            # 1) players2.consistency se o jogo gravar (hoje costuma vir NULL em todos)
+            # 2) senão: estabilidade das notas da TEMPORADA (s_ratings) — mais fiel que só 5 jogos
+            # 3) fallback: form_recent
+            cons = player.get("consistency")
+            if cons is not None and str(cons).strip() != "":
+                try:
+                    player["reg"] = round(max(0.0, min(100.0, float(cons))), 1)
+                except (TypeError, ValueError):
+                    player["reg"] = None
             else:
-                player["reg"] = None
+                valid = list(season_ratings) if season_ratings else [v for v in fr_vals if v is not None]
+                if len(valid) >= 2:
+                    mean = sum(valid) / len(valid)
+                    var = sum((v - mean) ** 2 for v in valid) / len(valid)
+                    sd = var ** 0.5
+                    # Atributo REGULARIDADE do jogo (como PAC/SHO). No .fl o campo
+                    # consistency ainda vem NULL; aproximamos pelas notas da temporada:
+                    # REG ≈ média×10 − desvio×30  (Kane no jogo=44 → fórmula=44.4)
+                    reg = mean * 10.0 - sd * 30.0
+                    player["reg"] = round(max(0.0, min(100.0, reg)), 1)
+                elif len(valid) == 1:
+                    player["reg"] = round(max(0.0, min(100.0, valid[0] * 10.0)), 1)
+                else:
+                    player["reg"] = None
             sr = player.get("squad_role")
             try:
                 player["squad_role"] = int(sr) if sr is not None and str(sr).strip() != "" else None
